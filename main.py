@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+from pprint import pprint
 from typing import Union
 from meps_parser import MEPSError, MEPSFile, MEPSFileParser
 
@@ -40,7 +41,7 @@ def process_meps_file(file_path: Union[str, Path], export_csv: bool = False) -> 
 if __name__ == "__main__":
     # Example usage with error handling
     try:
-        file_path = "files/MEPS_00002_20241028010429_1"
+        file_path = "files/MEPS_00029_20241027011323_1"
         result = process_meps_file(file_path, export_csv=True)
 
         # Export to JSON
