@@ -1,5 +1,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime
+import os
+import re
 from typing import List, Union, Dict, Optional, Iterator
 from decimal import Decimal
 import logging
@@ -42,12 +44,13 @@ class TerminalType(Enum):
     @classmethod
     def from_code(cls, code: str) -> 'TerminalType':
         try:
-            return cls(code)
+            return code
         except ValueError:
             raise MEPSValidationError(f"Invalid terminal type code: {code}")
 
 @dataclass
 class MEPSHeader:
+    id: int
     tipreg: str
     fich: str
     idinstori: str
@@ -58,6 +61,8 @@ class MEPSHeader:
     codmoeda: str
     taxaiva: Decimal
     idfichedst: str
+    filename: str
+    datetime: str
 
     def __post_init__(self):
         """Validate header data after initialization"""
@@ -72,6 +77,7 @@ class MEPSHeader:
 
 @dataclass
 class MEPSDetail:
+    id: int
     tipreg: str
     codproc: str
     idlog: str
@@ -88,6 +94,8 @@ class MEPSDetail:
     codresp: str
     nridresps: str
     version: int
+    filename: str
+    datetime: str
 
     @property
     def transaction_datetime(self) -> datetime:
@@ -104,11 +112,15 @@ class MEPSDetail:
 
 @dataclass
 class MEPSTrailer:
+    id: int
     tipreg: str
     totreg: int
     montranps: Decimal
     tottarps: Decimal
     valiva: Decimal
+    entidade: str
+    filename: str
+    datetime: str
 
 @dataclass
 class MEPSFile:
@@ -141,6 +153,7 @@ class MEPSFile:
             writer.writeheader()
             for detail in self.details:
                 writer.writerow({
+                    'id': self.header.id,
                     'reference': detail.refpag,
                     'date': detail.transaction_datetime.isoformat(),
                     'amount': detail.montpgps,
@@ -178,10 +191,11 @@ class MEPSFileParser:
         except:
             raise MEPSValidationError(f"Invalid decimal value: {value}")
 
-    def parse_header(self, line: str) -> MEPSHeader:
+    def parse_header(self, line: str, filename: str) -> MEPSHeader:
         """Parse header record (type 0)"""
         with self._error_context("header parsing"):
             return MEPSHeader(
+                id=int(line[21:32] + line[46:51]),
                 tipreg=line[0:1],
                 fich=line[1:5].strip(),
                 idinstori=line[5:13].strip(),
@@ -191,10 +205,12 @@ class MEPSFileParser:
                 entidade=line[46:51].strip(),
                 codmoeda=line[51:54].strip(),
                 taxaiva=self._parse_decimal(line[54:57]),
-                idfichedst=line[57:68].strip()
+                idfichedst=line[57:68].strip(),
+                filename=os.path.basename(filename),
+                datetime=datetime.now().strftime('%Y%m%d%H%M%S')
             )
 
-    def parse_detail(self, line: str) -> MEPSDetail:
+    def parse_detail(self, line: str, filename: str) -> MEPSDetail:
         """Parse detail record (type 2)"""
         with self._error_context("detail parsing"):
             # Determine version based on line length
@@ -202,13 +218,16 @@ class MEPSFileParser:
 
             # Common fields for both versions
             base_detail = {
+                'id': int(line[3:7] + line[7:15]),
                 'tipreg': line[0:1],
                 'codproc': line[1:3].strip(),
                 'idlog': line[3:7].strip(),
                 'nrlog': line[7:15].strip(),
                 'dthora': line[15:29].strip(),
                 'montpgps': self._parse_decimal(line[29:39]),
-                'version': version
+                'version': version,
+                'filename': os.path.basename(filename),
+                'datetime': datetime.now().strftime('%Y%m%d%H%M%S')
             }
 
             # Version-specific parsing
@@ -239,15 +258,32 @@ class MEPSFileParser:
 
             return MEPSDetail(**base_detail)
 
-    def parse_trailer(self, line: str) -> MEPSTrailer:
+    def parse_trailer(self, line: str, filename: str) -> MEPSTrailer:
         """Parse trailer record (type 9)"""
         with self._error_context("trailer parsing"):
+
+            # Extract the entidade_number from the filename
+            filename_parts = filename.split("_")
+            entidade_number = filename_parts[1]
+
+            # Filename cleanup
+            entidade = re.sub("^.*MEPS_|_.*$", "", filename)
+
+            # Convert the entidade_number to an integer
+            entidade_number = int(entidade_number)
+            filename_dt = re.sub("^.*_(\d{14})_.*$", r"\1", filename)
+            datetime_value = datetime.now().strftime('%Y%m%d%H%M%S')  # Current date
+
             return MEPSTrailer(
+                id= int(filename_dt+str(entidade_number)),  # Assuming this is the primary key
                 tipreg=line[0:1],
                 totreg=int(line[1:9].strip()),
                 montranps=self._parse_decimal(line[9:25]),
                 tottarps=self._parse_decimal(line[25:37]),
-                valiva=self._parse_decimal(line[37:49])
+                valiva=self._parse_decimal(line[37:49]),
+                entidade=entidade,
+                filename=filename,
+                datetime=datetime_value
             )
 
     def parse_file(self, file_path: Union[str, Path]) -> MEPSFile:
@@ -256,6 +292,10 @@ class MEPSFileParser:
         logger.info(f"Starting to parse file: {file_path}")
 
         with self._error_context("file parsing"):
+
+            # Extract filename
+            filename = Path(file_path).stem
+
             with open(file_path, 'r', encoding='utf-8') as file:
                 for line_number, line in enumerate(file, 1):
                     if not line.strip():
@@ -266,11 +306,11 @@ class MEPSFileParser:
 
                     try:
                         if record_type == '0':
-                            self.header = self.parse_header(line)
+                            self.header = self.parse_header(line, filename)
                         elif record_type == '2':
-                            self.details.append(self.parse_detail(line))
+                            self.details.append(self.parse_detail(line, filename))
                         elif record_type == '9':
-                            self.trailer = self.parse_trailer(line)
+                            self.trailer = self.parse_trailer(line, filename)
                         else:
                             raise MEPSValidationError(f"Invalid record type: {record_type}")
                     except Exception as e:
