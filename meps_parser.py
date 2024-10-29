@@ -2,13 +2,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import os
 import re
-from typing import List, Union, Dict, Optional, Iterator
+from typing import List, Union, Dict, Optional
 from decimal import Decimal
 import logging
 from enum import Enum
 from pathlib import Path
 import csv
-from io import StringIO
 import json
 from contextlib import contextmanager
 
@@ -83,6 +82,8 @@ class MEPSDetail:
     idlog: str
     nrlog: str
     dthora: str
+    data: str
+    hora: str
     montpgps: Decimal
     tarifaps: Decimal
     tipoterm: TerminalType
@@ -93,7 +94,7 @@ class MEPSDetail:
     modenv: str
     codresp: str
     nridresps: str
-    version: int
+    entidade: int
     filename: str
     datetime: str
 
@@ -194,20 +195,24 @@ class MEPSFileParser:
     def parse_header(self, line: str, filename: str) -> MEPSHeader:
         """Parse header record (type 0)"""
         with self._error_context("header parsing"):
+
+            idfich = line[21:32].strip()
+            entidade = re.sub("^0+", "", line[43:48]).strip()  # Remove leading zeros
+
             return MEPSHeader(
-                id=int(line[21:32] + line[46:51]),
+                id=int(idfich+entidade),
                 tipreg=line[0:1],
                 fich=line[1:5].strip(),
                 idinstori=line[5:13].strip(),
                 idinstdes=line[13:21].strip(),
-                idfich=line[21:32].strip(),
+                idfich=idfich,
                 idfichant=line[32:43].strip(),
-                entidade=line[46:51].strip(),
-                codmoeda=line[51:54].strip(),
-                taxaiva=self._parse_decimal(line[54:57]),
-                idfichedst=line[57:68].strip(),
-                filename=os.path.basename(filename),
-                datetime=datetime.now().strftime('%Y%m%d%H%M%S')
+                entidade=entidade,
+                codmoeda=line[48:51].strip(),
+                taxaiva=line[51:54],
+                idfichedst=line[54:65].strip(),
+                filename=os.path.basename(filename),  # Get the filename from the path,
+                datetime=datetime.now().strftime('%Y%m%d%H%M%S')  # Current date
             )
 
     def parse_detail(self, line: str, filename: str) -> MEPSDetail:
@@ -216,6 +221,8 @@ class MEPSFileParser:
             # Determine version based on line length
             version = 2 if len(line.strip()) >= 103 else 1
 
+            dthora = line[15:29].strip(),
+
             # Common fields for both versions
             base_detail = {
                 'id': int(line[3:7] + line[7:15]),
@@ -223,9 +230,11 @@ class MEPSFileParser:
                 'codproc': line[1:3].strip(),
                 'idlog': line[3:7].strip(),
                 'nrlog': line[7:15].strip(),
-                'dthora': line[15:29].strip(),
+                'dthora': dthora,
+                'data': dthora[:8],  # Left part of dthora
+                'hora': dthora[8:],  # Right part of dthora
                 'montpgps': self._parse_decimal(line[29:39]),
-                'version': version,
+                'entidade': re.sub("^.*MEPS_|_.*$", "", filename),
                 'filename': os.path.basename(filename),
                 'datetime': datetime.now().strftime('%Y%m%d%H%M%S')
             }
@@ -327,21 +336,23 @@ class MEPSFileParser:
                 trailer=self.trailer
             )
 
-    def _validate_file(self):
+    def _validate_file(self, validate: bool = False):
         """Validate file structure and contents"""
         with self._error_context("file validation"):
-            if not self.header:
-                raise MEPSValidationError("Missing header record")
-            if not self.trailer:
-                raise MEPSValidationError("Missing trailer record")
-            if not self.details:
-                raise MEPSValidationError("No detail records found")
+            # Perform basic validation
+            if validate:
+                if not self.header:
+                    raise MEPSValidationError("Missing header record")
+                if not self.trailer:
+                    raise MEPSValidationError("Missing trailer record")
+                if not self.details:
+                    raise MEPSValidationError("No detail records found")
 
-            # Validate record count
-            if len(self.details) != self.trailer.totreg:
-                raise MEPSValidationError(
-                    f"Record count mismatch. Expected {self.trailer.totreg}, got {len(self.details)}"
-                )
+                # Validate record count
+                if len(self.details) != self.trailer.totreg:
+                    raise MEPSValidationError(
+                        f"Record count mismatch. Expected {self.trailer.totreg}, got {len(self.details)}"
+                    )
 
             # Validate total amounts
             total_montpgps = sum(detail.montpgps for detail in self.details)
